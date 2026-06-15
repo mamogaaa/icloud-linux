@@ -809,8 +809,8 @@ class ICloudSyncEngine:
         return self.state.count_entries() > 0 and os.path.isdir(self.mirror.root)
 
     def initial_scan(self):
-        snapshot = self._crawl_remote_snapshot()
-        self._apply_remote_snapshot(snapshot)
+        snapshot, snapshot_started_at = self._crawl_remote_snapshot()
+        self._apply_remote_snapshot(snapshot, snapshot_started_at)
 
     def _reconcile_persistent_cache(self):
         entries = self.state.list_entries()
@@ -1001,9 +1001,16 @@ class ICloudSyncEngine:
             scanned_folders,
             time.time() - started_at,
         )
-        return snapshot
+        return snapshot, int(started_at)
 
-    def _apply_remote_snapshot(self, snapshot):
+    def _entry_changed_since_snapshot(self, entry, snapshot_started_at):
+        return bool(
+            snapshot_started_at
+            and entry
+            and int(entry.get("last_synced_at") or 0) >= snapshot_started_at
+        )
+
+    def _apply_remote_snapshot(self, snapshot, snapshot_started_at=None):
         remote_ids = set(snapshot.keys())
 
         for meta in snapshot.values():
@@ -1022,6 +1029,18 @@ class ICloudSyncEngine:
             if existing["dirty"]:
                 continue
 
+            if (
+                self._entry_changed_since_snapshot(existing, snapshot_started_at)
+                and existing["path"] != meta["path"]
+            ):
+                self._log_sync(
+                    "stale-snapshot-skip",
+                    path=existing["path"],
+                    target_path=meta["path"],
+                    remote_drivewsid=meta.get("remote_drivewsid"),
+                )
+                continue
+
             self._refresh_clean_entry(existing, meta)
 
         for entry in self.state.list_entries():
@@ -1031,6 +1050,13 @@ class ICloudSyncEngine:
             if entry["dirty"]:
                 self.logger.warning("Remote deleted dirty path %s; keeping local copy for upload", entry["path"])
                 self.state.clear_remote_identity(entry["path"])
+                continue
+            if self._entry_changed_since_snapshot(entry, snapshot_started_at):
+                self._log_sync(
+                    "stale-snapshot-delete-skip",
+                    path=entry["path"],
+                    remote_drivewsid=remote_id,
+                )
                 continue
             self.logger.info("Removing clean path deleted remotely: %s", entry["path"])
             self.mirror.remove_tree(entry["path"])
@@ -1280,8 +1306,8 @@ class ICloudSyncEngine:
     def _run_remote_refresh(self, reason):
         try:
             self._log_sync("refresh-start", reason=reason)
-            snapshot = self._crawl_remote_snapshot()
-            self._apply_remote_snapshot(snapshot)
+            snapshot, snapshot_started_at = self._crawl_remote_snapshot()
+            self._apply_remote_snapshot(snapshot, snapshot_started_at)
             self._log_sync("refresh-complete", reason=reason)
         except Exception as exc:
             self.logger.error("Remote refresh failed (%s): %s", reason, exc)
@@ -1421,14 +1447,34 @@ class ICloudSyncEngine:
             destination = self._remote_node_for_path(new_parent)
             if destination is None:
                 raise RuntimeError(f"Remote parent not available for {new_parent}")
-            self.api.drive.move_nodes_to_node([node], destination)
+            self._ensure_item_response_ok(
+                self.api.drive.move_nodes_to_node([node], destination),
+                "move",
+            )
             node = self._refresh_node_by_id(
                 entry["remote_drivewsid"],
                 entry.get("remote_shareid"),
             )
         if old_name != new_name:
-            node.rename(new_name)
+            self._ensure_item_response_ok(node.rename(new_name), "rename")
+        meta = self._refresh_child_meta(new_parent, new_name)
+        if meta.get("remote_drivewsid") != entry["remote_drivewsid"]:
+            raise RuntimeError(
+                f"Remote move verification failed for {entry['path']}: "
+                f"expected {entry['remote_drivewsid']}, got {meta.get('remote_drivewsid')}"
+            )
+        self.state.mark_clean(entry["path"], meta)
         self._log_sync("move-complete", path=synced_path, target_path=entry["path"])
+
+    def _ensure_item_response_ok(self, response, operation):
+        if not isinstance(response, dict):
+            return
+        failed = [
+            item for item in response.get("items", [])
+            if item.get("status") not in (None, "OK")
+        ]
+        if failed:
+            raise RuntimeError(f"Remote {operation} failed: {failed}")
 
     def _ensure_remote_parent(self, path):
         parent_path = os.path.dirname(path) or "/"
