@@ -1033,12 +1033,21 @@ class ICloudSyncEngine:
             drivewsid=meta.get("remote_drivewsid"),
             size=meta.get("size"),
         )
-        if self._is_directory_type(meta["type"]):
-            self.mirror.ensure_dir(local_path)
-            hydrated = True
-        else:
-            self.mirror.materialize_placeholder(local_path, meta["size"], meta["mtime"])
-            hydrated = meta["size"] == 0
+        try:
+            if self._is_directory_type(meta["type"]):
+                self.mirror.ensure_dir(local_path)
+                hydrated = True
+            else:
+                self.mirror.materialize_placeholder(local_path, meta["size"], meta["mtime"])
+                hydrated = meta["size"] == 0
+        except OSError as exc:
+            if exc.errno == errno.ENAMETOOLONG:
+                self.logger.warning(
+                    "Skipping remote path with a filename too long for the local filesystem: %s",
+                    local_path,
+                )
+                return
+            raise
         self.state.upsert_entry(
             {
                 **meta,
