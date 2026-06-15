@@ -94,6 +94,18 @@ class NamedFileStream:
         self._handle = handle
         self.name = name
 
+    def read(self, *args, **kwargs):
+        return self._handle.read(*args, **kwargs)
+
+    def seek(self, *args, **kwargs):
+        return self._handle.seek(*args, **kwargs)
+
+    def tell(self):
+        return self._handle.tell()
+
+    def close(self):
+        return self._handle.close()
+
     def __getattr__(self, attr):
         return getattr(self._handle, attr)
 
@@ -1057,7 +1069,7 @@ class ICloudSyncEngine:
                 "synced_path": local_path,
             }
         )
-        if meta["type"] == "file" and not hydrated:
+        if self.warmup_mode == "background" and meta["type"] == "file" and not hydrated:
             self._schedule_download(local_path)
 
     def _refresh_clean_entry(self, entry, meta):
@@ -1116,7 +1128,7 @@ class ICloudSyncEngine:
                 "synced_path": newpath,
             }
         )
-        if not hydrated:
+        if self.warmup_mode == "background" and not hydrated:
             self._schedule_download(newpath)
 
     def _resolve_conflict(self, entry):
