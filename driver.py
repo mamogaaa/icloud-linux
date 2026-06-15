@@ -1447,14 +1447,16 @@ class ICloudSyncEngine:
             destination = self._remote_node_for_path(new_parent)
             if destination is None:
                 raise RuntimeError(f"Remote parent not available for {new_parent}")
-            self._ensure_item_response_ok(
-                self.api.drive.move_nodes_to_node([node], destination),
-                "move",
-            )
-            node = self._refresh_node_by_id(
-                entry["remote_drivewsid"],
-                entry.get("remote_shareid"),
-            )
+            response = self.api.drive.move_nodes_to_node([node], destination)
+            self._ensure_item_response_ok(response, "move")
+            item = self._item_response_for_drivewsid(response, entry["remote_drivewsid"])
+            if item:
+                node = DriveNode(self.api.drive, item)
+            elif old_name != new_name:
+                node = self._refresh_node_by_id(
+                    entry["remote_drivewsid"],
+                    entry.get("remote_shareid"),
+                )
         if old_name != new_name:
             self._ensure_item_response_ok(node.rename(new_name), "rename")
         meta = self._refresh_child_meta(new_parent, new_name)
@@ -1475,6 +1477,14 @@ class ICloudSyncEngine:
         ]
         if failed:
             raise RuntimeError(f"Remote {operation} failed: {failed}")
+
+    def _item_response_for_drivewsid(self, response, drivewsid):
+        if not isinstance(response, dict):
+            return None
+        for item in response.get("items", []):
+            if item.get("drivewsid") == drivewsid and item.get("status") in (None, "OK"):
+                return item
+        return None
 
     def _ensure_remote_parent(self, path):
         parent_path = os.path.dirname(path) or "/"
